@@ -1,11 +1,21 @@
-// 定义外部变量
-let sitename = "域名监控与到期提醒"; //变量名SITENAME，自定义站点名称，默认为“域名监控”
-let domains = ""; //变量名DOMAINS，填入域名信息json文件直链，必须设置的变量
-let tgid = ""; //变量名TGID，填入TG机器人ID，不需要提醒则不填
-let tgtoken = ""; //变量名TGTOKEN，填入TG的TOKEN，不需要提醒则不填
-let days = 7; //变量名DAYS，提前几天发送TG提醒，默认为7天，必须为大于0的整数
-let apiUrl = ""; //变量名API_URL，搭建的WHOIS API接口地址，末尾必须带“/”
-let apiKey = ""; //变量名API_KEY，API接口密钥，搭建WHOIS API接口时设置的秘钥
+// 从环境变量读取配置
+function getConfig(env) {
+  return {
+    siteName: env.SITENAME || "域名到期监控",
+    siteIcon: env.ICON || 'https://pan.811520.xyz/icon/domain.png',
+    bgimgURL: env.BGIMG || 'https://pan.811520.xyz/icon/back.webp',
+    githubURL: env.GITHUB_URL || 'https://github.com/yutian81/domain-check',
+    blogURL: env.BLOG_URL || 'https://blog.811520.xyz/post/2025/04/domain-autocheck/',
+    blogName: env.BLOG_NAME || '青云志 Blog',
+    password: env.PASSWORD || "123123",
+    days: Number(env.DAYS || 7),
+    domains: env.DOMAINS,
+    tgid: env.TGID,
+    tgtoken: env.TGTOKEN,
+    apiUrl: env.API_URL,
+    apiKey: env.API_KEY
+  };
+}
 
 // 格式化日期为北京时间 YYYY-MM-DD
 function formatDateToBeijing(dateStr) {
@@ -23,10 +33,16 @@ function getPrimaryDomain(domain) {
 }
 
 // 调用WHOIS API获取域名信息
-async function fetchDomainFromAPI(domainName) {
+async function fetchDomainFromAPI(env, domainName) {
+  const config = getConfig(env);
+  
   try {
-    const response = await fetch(`${apiUrl}${domainName}`, {
-      headers: { 'X-API-KEY': apiKey }
+    const apiUrl = config.apiUrl.endsWith('/') 
+    ? `${config.apiUrl}${domainName}`
+    : `${config.apiUrl}/${domainName}`;
+
+    const response = await fetch(apiUrl, {
+      headers: { 'X-API-KEY': config.apiKey }
     });
     if (!response.ok) throw new Error('API请求失败');
     const data = await response.json();
@@ -34,8 +50,8 @@ async function fetchDomainFromAPI(domainName) {
       domain: domainName,
       registrationDate: formatDateToBeijing(data.creationDate),
       expirationDate: formatDateToBeijing(data.expiryDate),
-      system: data.registrar,
-      systemURL: data.registrarUrl
+      system: data.registrar || '未知',
+      systemURL: data.registrarUrl || '未知'
     };
   } catch (error) {
     console.error(`获取域名 ${domainName} 信息失败:`, error);
@@ -43,12 +59,14 @@ async function fetchDomainFromAPI(domainName) {
   }
 }
 
+// TG通知函数
 async function sendtgMessage(message, tgid, tgtoken) {
   if (!tgid || !tgtoken) return;
   const url = `https://api.telegram.org/bot${tgtoken}/sendMessage`;
   const params = {
     chat_id: tgid,
     text: message,
+    parse_mode: "HTML"
   };
   try {
     await fetch(url, {
@@ -61,36 +79,31 @@ async function sendtgMessage(message, tgid, tgtoken) {
   }
 }
 
-// 主逻辑
+// 获取域名信息并发出即将到期的TG通知
 async function checkDomains(env) {
-    sitename = env.SITENAME || sitename;
-    domains = env.DOMAINS || domains;
-    tgid = env.TGID || tgid;
-    tgtoken = env.TGTOKEN || tgtoken;
-    days = Number(env.DAYS || days);
-    apiUrl = env.API_URL || apiUrl;
-    apiKey = env.API_KEY || apiKey;
-  
-    if (!domains) {
+    const config = getConfig(env);
+
+    if (!config.domains) {
       console.error("DOMAINS 环境变量未设置");
-      return;
+      return [];
     }
   
     try {
       // 获取原始域名列表
-      const response = await fetch(domains);
-      if (!response.ok) throw new Error('Network response was not ok');
-      let domainsData = await response.json();
+      const response = await fetch(config.domains);
+      if (!response.ok) throw new Error('网络响应不正常');
+      const domainsData = await response.json();
       if (!Array.isArray(domainsData)) throw new Error('JSON 数据格式不正确');
-      const today = new Date().toISOString().split('T')[0];
+
       const processedDomains = [];
-  
+      const today = new Date().toISOString().split('T')[0];
+      
       // 处理每个域名
       for (const domain of domainsData) {
         let domainInfo = {...domain};
         const primaryDomain = getPrimaryDomain(domain.domain);
         if (primaryDomain === domain.domain) {
-          const apiData = await fetchDomainFromAPI(domain.domain);
+          const apiData = await fetchDomainFromAPI(env, domain.domain);
           if (apiData) {
             domainInfo = {
               ...domainInfo,
@@ -106,11 +119,18 @@ async function checkDomains(env) {
         const expirationDate = new Date(domainInfo.expirationDate);
         const daysRemaining = Math.ceil((expirationDate - new Date()) / (1000 * 60 * 60 * 24));
   
-        if (daysRemaining > 0 && daysRemaining <= days) {
-          const message = `[域名] ${domainInfo.domain} 将在 ${daysRemaining} 天后过期。过期日期：${domainInfo.expirationDate}`;  
+        if (daysRemaining > 0 && daysRemaining <= config.days) {
+          const message = `
+<b>🚨 域名到期提醒 🚨</b>
+          
+域名: <code>${domainInfo.domain}</code>
+将在 <b>${daysRemaining} 天</b>后过期！
+📅 过期日期: ${domainInfo.expirationDate}
+🔗 前往续期: <a href="${domainInfo.systemURL}">${domainInfo.system}</a>`;
+
           const lastSentDate = await env.DOMAINS_TG_KV.get(domainInfo.domain);
           if (lastSentDate !== today) {
-            await sendtgMessage(message, tgid, tgtoken);
+            await sendtgMessage(message, config.tgid, config.tgtoken);
             await env.DOMAINS_TG_KV.put(domainInfo.domain, today);
           }
         }
@@ -118,37 +138,294 @@ async function checkDomains(env) {
       return processedDomains;
     } catch (error) {
       console.error("检查域名时出错:", error);
-      throw error;
+      return [];
     }
 }
 
-export default {
-    // 手动触发器
-    async fetch(request, env) {
-      try {
-        const processedDomains = await checkDomains(env);
-        const htmlContent = await generateHTML(processedDomains, sitename);
-        return new Response(htmlContent, {
+// 处理登录请求
+async function handleLogin(request, env) {
+  const config = getConfig(env);
+  
+  if (request.method === 'GET') {
+      // 显示登录页面
+      return new Response(generateLoginPage(false, config.siteName, config.siteIcon, config.bgimgURL, config.githubURL, config.blogURL, config.blogName), {
           headers: { 'Content-Type': 'text/html' },
-        });
+      });
+  } else if (request.method === 'POST') {
+      // 处理登录请求
+      let password;
+      const contentType = request.headers.get('content-type') || '';
+
+      try {
+          if (contentType.includes('application/json')) {
+              // 解析JSON请求体
+              const jsonData = await request.json();
+              password = jsonData.password;
+          } else if (contentType.includes('application/x-www-form-urlencoded')) {
+              // 解析表单数据
+              const formData = await request.formData();
+              password = formData.get('password');
+          } else {
+              // 不支持的Content-Type
+              return new Response('不支持的Content-Type', { status: 415 });
+          }
+
+          // 检查密码是否正确
+          if (password === config.password) {
+              // 设置cookie，有效期1周
+              const expires = new Date();
+              expires.setDate(expires.getDate() + 7);
+              
+              const headers = new Headers();
+              headers.set('Location', '/');
+              headers.set('Set-Cookie', `auth=${password}; Expires=${expires.toUTCString()}; HttpOnly; Path=/; Secure; SameSite=Lax`);
+              
+              return new Response(null, {
+                  status: 302,
+                  headers: headers
+              });
+          } else {
+              // 密码错误，显示错误信息
+              return new Response(generateLoginPage(true, config.siteName, config.siteIcon, config.bgimgURL, config.githubURL, config.blogURL, config.blogName), {
+                  headers: { 'Content-Type': 'text/html' },
+              });
+          }
       } catch (error) {
-        return new Response("无法获取或解析域名的 json 文件", { status: 500 });
+          console.error('解析请求体失败:', error);
+          return new Response('无效的请求数据', { status: 400 });
       }
-    },
-    
-    // 定时触发器
-    async scheduled(event, env, ctx) {
+  }
+
+  // 其他HTTP方法返回405
+  return new Response('Method Not Allowed', { status: 405 });
+}
+
+export default {
+  async fetch(request, env) {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      const config = getConfig(env);
+      
+      // 处理登录路由
+      if (path === '/login') {
+          return handleLogin(request, env);
+      }
+      
+      // 检查cookie中的认证信息
+      const cookie = request.headers.get('Cookie');
+      let authToken = null;
+      if (cookie) {
+          const match = cookie.match(/auth=([^;]+)/);
+          if (match) authToken = match[1];
+      }
+           
+      // 如果未认证且不是登录页面，重定向到登录页面
+      if (!config.password || authToken === config.password) {
+          // 已认证，处理请求
+          try {
+              const processedDomains = await checkDomains(env);
+              
+              // 根据Accept头返回不同格式
+              const accept = request.headers.get('Accept') || '';
+              if (accept.includes('application/json')) {
+                  // 返回JSON格式
+                  return new Response(JSON.stringify(processedDomains), {
+                      headers: { 'Content-Type': 'application/json' },
+                  });
+              } else {
+                  // 返回HTML格式
+                  const htmlContent = await generateHTML(processedDomains, config.siteName, config.siteIcon, config.bgimgURL, config.githubURL, config.blogURL, config.blogName);
+                  return new Response(htmlContent, {
+                      headers: { 'Content-Type': 'text/html' },
+                  });
+              }
+          } catch (error) {
+              console.error('处理请求失败:', error);
+              return new Response("无法获取或解析域名的 json 文件", { status: 500 });
+          }
+      } else {
+          // 未认证，重定向到登录页面
+          const headers = new Headers();
+          headers.set('Location', '/login');
+          return new Response(null, {
+              status: 302,
+              headers: headers
+          });
+      }
+  },
+  
+  // 定时触发器保持不变
+  async scheduled(event, env, ctx) {
       ctx.waitUntil(
-        checkDomains(env).catch(err => {
-          console.error('定时任务执行失败:', err);
-        })
+          checkDomains(env).catch(err => {
+              console.error('定时任务执行失败:', err);
+          })
       );
-    }
+  }
 };
 
-async function generateHTML(domains, SITENAME) {
-  const siteIcon = 'https://pan.811520.xyz/icon/domain.png';
-  const bgimgURL = 'https://bing.img.run/1920x1080.php';
+// 生成登录页面HTML
+function generateLoginPage(showError = false, siteName, siteIcon, bgimgURL, githubURL, blogURL, blogName) { 
+  return `
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>登录 - ${siteName}</title>
+      <link rel="icon" href="${siteIcon}" type="image/png">
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+      <style>
+        body, html {
+          height: 100%;
+          margin: 0;
+          padding: 10px;
+          font-family: Arial, sans-serif;
+          background-image: url('${bgimgURL}');
+          background-position: center;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+        }
+        .login-container {
+          background-color: rgba(255, 255, 255, 0.5);
+          padding: 25px 25px 10px 25px;
+          border-radius: 8px;
+          box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+          width: 400px;
+          text-align: center;
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          box-shadow: 
+            0 4px 15px rgba(0,0,0,0.15),
+            inset 0 0 10px rgba(255,255,255,0.1);
+        }
+        .logo {
+          width: 80px;
+          height: 80px;
+          margin: 0 auto 15px;
+          background-image: url('${siteIcon}');
+          background-size: contain;
+          background-repeat: no-repeat;
+          background-position: center;
+        }
+        h1 {
+          color: #2573b3;
+          margin: 0 0 20px 0;
+          font-size: 1.8rem;
+        }
+        .input-group {
+          margin-bottom: 20px;
+          text-align: left;
+        }
+        label {
+          display: block;
+          margin-bottom: 8px;
+          font-weight: bold;
+          color: #333;
+        }
+        input[type="password"] {
+          width: 100%;
+          padding: 12px;
+          background-color: rgba(255, 255, 255, 0.75);
+          border: 1px solid #ddd;
+          border-radius: 4px;
+          box-sizing: border-box;
+          font-size: 16px;
+          transition: border-color 0.3s;
+        }
+        input[type="password"]:focus {
+          border-color: #2573b3;
+          outline: none;
+          box-shadow: 0 0 0 2px rgba(37, 115, 179, 0.2);
+        }
+        button {
+          width: 100%;
+          padding: 12px;
+          background-color: #2573b3;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 16px;
+          font-weight: bold;
+          transition: background-color 0.3s;
+        }
+        button:hover {
+          background-color: #1c5a8a;
+        }
+        .error {
+          color: #e74c3c;
+          margin-top: 15px;
+          padding: 10px;
+          background-color: rgba(231, 76, 60, 0.1);
+          border-radius: 4px;
+          display: ${showError ? 'block' : 'none'};
+        }
+        .footer {
+          background-color: none;
+          color: white;
+          font-size: 0.8rem;
+          width: 100%;
+          text-align: center;
+          padding: 16px 0;
+          margin-top: 10px;
+        }
+        .footer p {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: center;
+          align-items: center;
+          gap: 8px;
+          margin: 0;
+        }
+        .footer a {
+          color: white;
+          text-decoration: none;
+          transition: color 0.3s ease;
+          white-space: nowrap;
+        }
+        .footer a:hover {
+          color: #f1c40f;
+        }
+        @media (max-width: 768px) {
+          .footer p {
+            line-height: 0.9;
+            font-size: 0.75rem;
+          }
+          .login-container {
+            width: 90%;
+          }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="login-container">
+        <h1>${siteName}</h1>
+        <form id="loginForm" action="/login" method="POST">
+          <div class="input-group">
+            <label for="password">访问密码</label>
+            <input type="password" id="password" name="password" required autocomplete="current-password">
+          </div>
+          <button type="submit">登录系统</button>
+          <div id="errorMessage" class="error">密码错误，请重试</div>
+        </form>
+        <div class="footer">
+          <p>
+            <span>Copyright © 2025 Yutian81</span><span>|</span>
+            <a href="${githubURL}" target="_blank">
+              <i class="fab fa-github"></i> GitHub</a><span>|</span>
+            <a href="${blogURL}" target="_blank">
+              <i class="fas fa-blog"></i> ${blogName}</a>
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+}
+
+async function generateHTML(domains, siteName, siteIcon, bgimgURL, githubURL, blogURL, blogName) {
   const rows = await Promise.all(domains.map(async info => {
     const registrationDate = new Date(info.registrationDate);
     const expirationDate = new Date(info.expirationDate);
@@ -184,39 +461,52 @@ async function generateHTML(domains, SITENAME) {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>${SITENAME}</title>
+      <title>${siteName}</title>
       <link rel="icon" href="${siteIcon}" type="image/png">
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
       <style>
-        body {
-          font-family: Arial, sans-serif;
-          line-height: 1.6;
+        body, html {
+          height: 100%;
           margin: 0;
           padding: 0;
-          background-image: url('${bgimgURL}');
+          font-family: Arial, sans-serif;
+          line-height: 1.6;
           color: #333;
           display: flex;
           flex-direction: column;
-          min-height: 100vh;
+        }
+        body {
+          background-image: url('${bgimgURL}');
+          background-size: cover;
+          background-position: center;
         }
         .container {
           flex: 1;
           width: 95%;
           max-width: 1200px;
           margin: 20px auto;
-          background-color: rgba(255, 255, 255, 0.7);
+          background-color: rgba(255, 255, 255, 0.5);
           box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
           border-radius: 5px;
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          box-shadow: 
+            0 4px 15px rgba(0,0,0,0.15),
+            inset 0 0 10px rgba(255,255,255,0.1);
           overflow: hidden;
+          display: flex;
+          flex-direction: column;
         }
         h1 {
           background-color: #2573b3;
           color: #fff;
-          padding: 15px 35px 15px 35px;
+          padding: 10px 35px;
           margin: 0;
+          flex-shrink: 0; /* 防止标题被压缩 */
         }
         .table-container {
-          width: 100%;
-          overflow-x: auto;
+          flex: 1;
+          overflow: auto; /* 仅在容器内滚动 */
         }
         table {
           width: 100%;
@@ -233,6 +523,9 @@ async function generateHTML(domains, SITENAME) {
         th {
           background-color: rgba(242, 242, 242, 0.7);
           font-weight: bold;
+          color: #2573B3;
+          position: sticky;
+          top: 0; /* 固定表头 */
         }
         .status-dot {
           display: inline-block;
@@ -253,38 +546,53 @@ async function generateHTML(domains, SITENAME) {
           background-color: #2573b3;
         }
         .footer {
-          text-align: center;
-          padding: 0;
-          background-color: #2573b3;
+          background-color: #2573b3 !important;
+          color: white;
           font-size: 0.9rem;
-          color: #fff;
+          width: 100%;
+          text-align: center;
+          padding: 16px 0;
           margin-top: auto;
+        }
+        .footer p {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: center;
+          align-items: center;
+          gap: 8px;
+          margin: 0;
         }
         .footer a {
           color: white;
           text-decoration: none;
-          margin-left: 10px;
           transition: color 0.3s ease;
+          white-space: nowrap;
         }
         .footer a:hover {
           color: #f1c40f;
+        }
+        @media (max-width: 768px) {
+          .footer p {
+            line-height: 0.9;
+            font-size: 0.75rem;
+          }
         }
       </style>
     </head>
     <body>
       <div class="container">
-        <h1>${SITENAME}</h1>
+        <h1>${siteName}</h1>
         <div class="table-container">
           <table>
             <thead>
               <tr>
-                <th>状态</th>
-                <th>域名</th>
-                <th>域名注册商</th>
-                <th>注册时间</th>
-                <th>过期时间</th>
-                <th>剩余天数</th>
-                <th>使用进度</th>
+                <th><i class="fas fa-signal"></i> 状态</th>
+                <th><i class="fas fa-globe"></i> 域名</th>
+                <th><i class="fas fa-building"></i> 域名注册商</th>
+                <th><i class="fas fa-calendar-plus"></i> 注册时间</th>
+                <th><i class="fas fa-calendar-times"></i> 过期时间</th>
+                <th><i class="fas fa-hourglass-half"></i> 剩余天数</th>
+                <th><i class="fas fa-tasks"></i> 使用进度</th>
               </tr>
             </thead>
             <tbody>
@@ -295,9 +603,11 @@ async function generateHTML(domains, SITENAME) {
       </div>
       <div class="footer">
         <p>
-          Copyright © 2025 Yutian81&nbsp;&nbsp;&nbsp;| 
-          <a href="https://github.com/yutian81/domain-check" target="_blank">GitHub Repository</a>&nbsp;&nbsp;&nbsp;| 
-          <a href="https://blog.811520.xyz/" target="_blank">青云志博客</a>
+          <span>Copyright © 2025 Yutian81</span><span>|</span>
+          <a href="${githubURL}" target="_blank">
+            <i class="fab fa-github"></i> GitHub Repo</a><span>|</span>
+          <a href="${blogURL}" target="_blank">
+            <i class="fas fa-blog"></i> ${blogName}</a>
         </p>
       </div>
     </body>
